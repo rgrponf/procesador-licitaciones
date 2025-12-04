@@ -1,11 +1,16 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import pandas as pd
 import re, os
 from PyPDF2 import PdfReader
 
 app = FastAPI()
 
+OUTPUT_FILE = "convocatorias.xlsx"
+
+# -------------------------------
+# 🔹 FORMATOS
+# -------------------------------
 def format_currency(v):
     if not v:
         return ""
@@ -46,6 +51,10 @@ def extract_field(b, label, next_labels):
     value = re.sub(r"\s+", " ", value)
     return value
 
+
+# -------------------------------
+# 🔹 CONFIGURACIÓN DE CAMPOS
+# -------------------------------
 ALL_LABELS = [
     "Tipo de publicación:", "Ámbito:", "Entidad Adjudicadora:", "Datos de contacto:",
     "Objeto:", "Tramitacion y Procedimiento:", "Tramitación y Procedimiento:",
@@ -53,6 +62,10 @@ ALL_LABELS = [
     "Enlace al pliego:", "Vencimiento:"
 ]
 
+
+# -------------------------------
+# 🔹 ENDPOINT PRINCIPAL
+# -------------------------------
 @app.post("/procesar-licitaciones")
 async def procesar_licitaciones(req: Request):
     data = await req.json()
@@ -62,27 +75,48 @@ async def procesar_licitaciones(req: Request):
     for path in file_paths:
         if not os.path.exists(path):
             continue
+
         reader = PdfReader(path)
+
         for page in reader.pages:
             page_text = page.extract_text() or ""
+
+            # -------------------------------
+            # 🔍 EXTRACCIÓN DE URLS MEJORADA
+            # -------------------------------
             page_uris = []
             annots = page.get("/Annots")
+
             if annots:
-                for a in annots:
+                for annot in annots:
                     try:
-                        obj = a.get_object()
+                        annot_obj = annot.get_object()
                     except Exception:
                         continue
-                    action = obj.get("/A")
-                    if action:
-                        try:
-                            action_obj = action.get_object()
-                        except Exception:
-                            action_obj = action
-                        uri = action_obj.get("/URI") if hasattr(action_obj, "get") else None
-                        if isinstance(uri, str) and uri.startswith(("http://", "https://")):
-                            page_uris.append(uri)
 
+                    action = annot_obj.get("/A") or annot_obj.get("/a")
+                    if not action:
+                        continue
+                    try:
+                        action_obj = action.get_object()
+                    except Exception:
+                        action_obj = action
+
+                    uri = (
+                        action_obj.get("/URI")
+                        or action_obj.get("/Uri")
+                        or None
+                    )
+                    if isinstance(uri, str) and uri.startswith(("http://", "https://")):
+                        page_uris.append(uri)
+
+            # Fallback: buscar URLs directamente en el texto si no hay anotaciones
+            if not page_uris:
+                page_uris = re.findall(r"https?://[^\s)>\]]+", page_text)
+
+            # -------------------------------
+            # 🔹 BLOQUES DE CONVOCATORIAS
+            # -------------------------------
             blocks = [b for b in re.split(r"(?=Número de pliego:)", page_text) if "Número de pliego:" in b]
             uri_index_page = 0
 
@@ -110,7 +144,21 @@ async def procesar_licitaciones(req: Request):
                     "Vencimiento": format_date(extract_field(block, "Vencimiento:", ALL_LABELS)),
                 })
 
+    # -------------------------------
+    # 🔹 GENERAR EXCEL
+    # -------------------------------
     df = pd.DataFrame(rows)
-    output_path = "/tmp/convocatorias.xlsx"
-    df.to_excel(output_path, index=False)
-    return JSONResponse({"excelUrl": output_path})
+    df.to_excel(OUTPUT_FILE, index=False)
+
+    excel_url = f"/{OUTPUT_FILE}"
+    return JSONResponse({"excelUrl": excel_url})
+
+
+# -------------------------------
+# 🔹 DESCARGAR ARCHIVO EXCEL
+# -------------------------------
+@app.get("/convocatorias.xlsx")
+async def descargar_excel():
+    if not os.path.exists(OUTPUT_FILE):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    return FileResponse(OUTPUT_FILE, filename="convocatorias.xlsx")
