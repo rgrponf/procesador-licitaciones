@@ -162,3 +162,7 @@ async def descargar_excel():
     if not os.path.exists(OUTPUT_FILE):
         return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
     return FileResponse(OUTPUT_FILE, filename="convocatorias.xlsx")
+
+@app.get("/")
+async def root():
+    return {"status": "ok"}
