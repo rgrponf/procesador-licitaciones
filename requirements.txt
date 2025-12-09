@@ -4,3 +4,4 @@ pandas
 pdfminer.six
 openpyxl
 requests
+PyPDF2
