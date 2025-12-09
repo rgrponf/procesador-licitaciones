@@ -81,14 +81,16 @@ async def procesar_licitaciones(req: Request):
             print(f"❌ Error al procesar {url}: {e}")
             continue
 
-        # Dividir por posibles encabezados
-        blocks = re.split(r"(?=Número de pliego:|Nº de expediente:|Convocatoria de licitación)", text)
-        blocks = [b for b in blocks if any(x in b for x in ["CONVOCATORIA", "Convocatoria", "licitación"])]
+        # --- LIMPIEZA DEL TEXTO ---
+        clean_text = re.sub(r"(\w)\n(\w)", r"\1 \2", text)  # une palabras partidas por salto
+        clean_text = clean_text.replace("\r", "").replace("\n", " ")
+
+        # --- DETECCIÓN FLEXIBLE DE CONVOCATORIAS ---
+        blocks = re.split(r"(?=CONVOCATORIA)", clean_text, flags=re.IGNORECASE)
+        blocks = [b for b in blocks if "Número de pliego:" in b or "Expediente:" in b]
 
         for block in blocks:
-            tipo_match = re.search(r"(CONVOCATORIA|Convocatoria|Licitación)", block)
-            tipo = tipo_match.group(1).strip() if tipo_match else ""
-            if not tipo:
+            if not re.search(r"CONVOCATORIA", block, re.IGNORECASE):
                 continue
 
             rows.append({
@@ -111,7 +113,7 @@ async def procesar_licitaciones(req: Request):
 
     # Enlace público
     public_url = f"https://procesador-licitaciones.onrender.com/descargar/{OUTPUT_FILE}"
-    return JSONResponse({"excelUrl": public_url})
+    return JSONResponse({"excelUrl": public_url, "registros": len(rows)})
 
 # -------------------------------
 # 🔹 Endpoint para descargar Excel
@@ -129,4 +131,3 @@ async def descargar_archivo(filename: str):
 @app.get("/")
 async def root():
     return {"status": "ok"}
-
