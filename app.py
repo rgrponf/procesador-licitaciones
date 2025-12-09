@@ -79,7 +79,7 @@ async def procesar_licitaciones(req: Request):
             r.raise_for_status()
             pdf_data = BytesIO(r.content)
 
-            # --- 1️⃣ Extraer texto con pdfminer (mejor OCR)
+            # --- 1️⃣ Extraer texto con pdfminer (más preciso)
             text = extract_text(pdf_data)
 
             # --- 2️⃣ Extraer URLs reales con PyPDF2 ---
@@ -128,21 +128,18 @@ async def procesar_licitaciones(req: Request):
         clean_text = re.sub(r"(\w)\n(\w)", r"\1 \2", text)
         clean_text = clean_text.replace("\r", "").replace("\n", " ")
 
-        # --- DETECCIÓN FLEXIBLE DE CONVOCATORIAS ---
+        # --- DETECCIÓN DE BLOQUES POR 'CONVOCATORIA' ---
         blocks = re.split(r"(?=CONVOCATORIA)", clean_text, flags=re.IGNORECASE)
-        blocks = [b for b in blocks if "Número de pliego:" in b or "Expediente:" in b]
+        blocks = [b for b in blocks if "CONVOCATORIA" in b or "Convocatoria" in b]
 
         url_index = 0
         for block in blocks:
-            if not re.search(r"CONVOCATORIA", block, re.IGNORECASE):
-                continue
-
             enlace = ""
             if url_index < len(urls_encontradas):
                 enlace = urls_encontradas[url_index]
                 url_index += 1
 
-            # Si estamos en modo estricto, ignorar convocatorias sin enlace
+            # Si modo estricto está activo, descartar sin enlace
             if strict_mode and not enlace:
                 continue
 
@@ -164,9 +161,12 @@ async def procesar_licitaciones(req: Request):
     df = pd.DataFrame(rows)
     df.to_excel(output_path, index=False)
 
-    # Enlace público
     public_url = f"https://procesador-licitaciones.onrender.com/descargar/{OUTPUT_FILE}"
-    return JSONResponse({"excelUrl": public_url, "registros": len(rows), "strictMode": strict_mode})
+    return JSONResponse({
+        "excelUrl": public_url,
+        "registros": len(rows),
+        "strictMode": strict_mode
+    })
 
 # -------------------------------
 # 🔹 Endpoint para descargar Excel
