@@ -166,3 +166,6 @@ async def descargar_excel():
 @app.get("/")
 async def root():
     return {"status": "ok"}
+
+excel_url = f"https://procesador-licitaciones.onrender.com/{OUTPUT_FILE}"
+return JSONResponse({"excelUrl": excel_url})
