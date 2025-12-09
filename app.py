@@ -5,6 +5,7 @@ import pandas as pd
 import re, os, requests
 from io import BytesIO
 from pdfminer.high_level import extract_text
+import PyPDF2
 
 app = FastAPI()
 
@@ -72,26 +73,55 @@ async def procesar_licitaciones(req: Request):
 
     for url in file_urls:
         try:
-            print(f"Descargando PDF: {url}")
+            print(f"📥 Descargando PDF: {url}")
             r = requests.get(url, timeout=30)
             r.raise_for_status()
             pdf_data = BytesIO(r.content)
+
+            # --- 1️⃣ Extraer texto con pdfminer (mejor para OCR y saltos de línea)
             text = extract_text(pdf_data)
+
+            # --- 2️⃣ Extraer URLs reales con PyPDF2 (anotaciones /URI)
+            pdf_data.seek(0)
+            reader = PyPDF2.PdfReader(pdf_data)
+            urls_encontradas = []
+            for page in reader.pages:
+                annots = page.get("/Annots")
+                if annots:
+                    for a in annots:
+                        try:
+                            obj = a.get_object()
+                            action = obj.get("/A")
+                            if action:
+                                uri = action.get("/URI")
+                                if isinstance(uri, str) and uri.startswith(("http://", "https://")):
+                                    urls_encontradas.append(uri)
+                        except Exception:
+                            continue
+
+            print(f"🔗 URLs encontradas: {len(urls_encontradas)}")
+
         except Exception as e:
             print(f"❌ Error al procesar {url}: {e}")
             continue
 
         # --- LIMPIEZA DEL TEXTO ---
-        clean_text = re.sub(r"(\w)\n(\w)", r"\1 \2", text)  # une palabras partidas por salto
+        clean_text = re.sub(r"(\w)\n(\w)", r"\1 \2", text)  # une palabras partidas
         clean_text = clean_text.replace("\r", "").replace("\n", " ")
 
         # --- DETECCIÓN FLEXIBLE DE CONVOCATORIAS ---
         blocks = re.split(r"(?=CONVOCATORIA)", clean_text, flags=re.IGNORECASE)
         blocks = [b for b in blocks if "Número de pliego:" in b or "Expediente:" in b]
 
+        url_index = 0
         for block in blocks:
             if not re.search(r"CONVOCATORIA", block, re.IGNORECASE):
                 continue
+
+            enlace = ""
+            if url_index < len(urls_encontradas):
+                enlace = urls_encontradas[url_index]
+                url_index += 1
 
             rows.append({
                 "Ámbito": extract_field(block, "Ámbito:", ALL_LABELS),
@@ -102,7 +132,7 @@ async def procesar_licitaciones(req: Request):
                 "Expediente": extract_field(block, "Expediente:", ALL_LABELS),
                 "Presupuesto": format_currency(extract_field(block, "Presupuesto:", ALL_LABELS)),
                 "Valor estimado del contrato": format_currency(extract_field(block, "Valor estimado del contrato:", ALL_LABELS)),
-                "Enlace al pliego (URL)": extract_field(block, "Enlace al pliego:", ALL_LABELS),
+                "Enlace al pliego (URL)": enlace,
                 "Vencimiento": format_date(extract_field(block, "Vencimiento:", ALL_LABELS)),
             })
 
