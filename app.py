@@ -189,3 +189,7 @@ async def descargar_archivo(filename: str):
 @app.get("/")
 async def root():
     return {"status": "ok"}
+
+@app.head("/")
+async def head_root():
+    return {"status": "ok"}
