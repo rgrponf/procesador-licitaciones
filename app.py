@@ -167,5 +167,57 @@ async def descargar_excel():
 async def root():
     return {"status": "ok"}
 
-excel_url = f"https://procesador-licitaciones.onrender.com/{OUTPUT_FILE}"
-return JSONResponse({"excelUrl": excel_url})
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+import pandas as pd
+import re, os
+from PyPDF2 import PdfReader
+
+app = FastAPI()
+
+# --- Permitir peticiones desde cualquier origen (necesario para GPT) ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+OUTPUT_FILE = "convocatorias.xlsx"
+
+# --- (Mantén tus funciones existentes: format_currency, format_date, extract_field, etc.) ---
+
+@app.post("/procesar-licitaciones")
+async def procesar_licitaciones(req: Request):
+    data = await req.json()
+    file_paths = data.get("fileUrls", [])
+    rows = []
+
+    # Aquí va todo el procesamiento que ya tienes...
+    # (No lo borres, solo añade el final de este bloque ↓)
+
+    # 🔹 Guardar el archivo en /tmp (Render lo permite servir)
+    output_path = f"/tmp/{OUTPUT_FILE}"
+    df = pd.DataFrame(rows)
+    df.to_excel(output_path, index=False)
+
+    # 🔹 Crear enlace público con dominio completo
+    public_url = f"https://procesador-licitaciones.onrender.com/descargar/{OUTPUT_FILE}"
+    return JSONResponse({"excelUrl": public_url})
+
+
+# --- Nuevo endpoint: servir cualquier archivo generado ---
+@app.get("/descargar/{filename}")
+async def descargar_archivo(filename: str):
+    file_path = f"/tmp/{filename}"
+    if not os.path.exists(file_path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+    return FileResponse(file_path, filename=filename)
+
+
+# --- Health check para Render ---
+@app.get("/")
+async def root():
+    return {"status": "ok"}
