@@ -1,15 +1,13 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-import re, os, requests
+import pandas as pd, re, os, requests, unicodedata
 from io import BytesIO
 from pdfminer.high_level import extract_text
 import PyPDF2
 
 app = FastAPI()
 
-# --- Permitir llamadas desde GPT y navegadores ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,9 +18,34 @@ app.add_middleware(
 
 OUTPUT_FILE = "convocatorias.xlsx"
 
-# -------------------------------
-# 🔹 Funciones auxiliares
-# -------------------------------
+# -----------------------------------------
+# 🔹 Utilidades
+# -----------------------------------------
+def limpiar_texto(texto: str) -> str:
+    """ETAPA 1 – Preprocesamiento: limpia y normaliza texto PDF."""
+    # Normalizar codificación Unicode
+    texto = unicodedata.normalize("NFKC", texto)
+    texto = texto.replace("\xa0", " ").replace("\t", " ").replace("\r", " ")
+    texto = re.sub(r"[^\S\n]+", " ", texto)  # eliminar dobles espacios
+
+    # Mantener saltos antes de etiquetas conocidas
+    etiquetas = [
+        "Ámbito:", "Entidad Adjudicadora:", "Objeto:", "Tramitacion y Procedimiento:",
+        "Tramitación y Procedimiento:", "Expediente:", "Presupuesto:",
+        "Valor estimado del contrato:", "Enlace al pliego:", "Vencimiento:"
+    ]
+    for e in etiquetas:
+        texto = texto.replace(e, f"\n{e}")
+
+    # Eliminar saltos innecesarios dentro de frases
+    texto = re.sub(r"(?<!:)\n(?!\w+:)", " ", texto)
+
+    # Normalizar tildes y mayúsculas/minúsculas
+    texto = texto.replace("Ã¡", "á").replace("Ã©", "é").replace("Ã­", "í")
+    texto = texto.replace("Ã³", "ó").replace("Ãº", "ú").replace("Ã±", "ñ")
+
+    return texto.strip()
+
 def format_currency(v):
     if not v:
         return ""
@@ -55,16 +78,9 @@ def extract_field(b, label, next_labels):
     value = re.sub(r"\s+", " ", value)
     return value
 
-ALL_LABELS = [
-    "Tipo de publicación:", "Ámbito:", "Entidad Adjudicadora:", "Datos de contacto:",
-    "Objeto:", "Tramitacion y Procedimiento:", "Tramitación y Procedimiento:",
-    "Expediente:", "Presupuesto:", "Valor estimado del contrato:",
-    "Enlace al pliego:", "Vencimiento:"
-]
-
-# -------------------------------
+# -----------------------------------------
 # 🔹 Endpoint principal
-# -------------------------------
+# -----------------------------------------
 @app.post("/procesar-licitaciones")
 async def procesar_licitaciones(req: Request):
     data = await req.json()
@@ -79,14 +95,18 @@ async def procesar_licitaciones(req: Request):
             r.raise_for_status()
             pdf_data = BytesIO(r.content)
 
-            # --- 1️⃣ Extraer texto con pdfminer (más preciso)
-            text = extract_text(pdf_data)
-
-            # --- 2️⃣ Extraer URLs reales con PyPDF2 ---
-            pdf_data.seek(0)
+            # Extraer texto crudo página a página
             reader = PyPDF2.PdfReader(pdf_data)
-            urls_encontradas = []
+            paginas_limpias = []
+            for i, page in enumerate(reader.pages):
+                texto_crudo = extract_text(BytesIO(r.content), page_numbers=[i])
+                paginas_limpias.append(limpiar_texto(texto_crudo or ""))
 
+            texto_total = "\n".join(paginas_limpias)
+
+            # Extraer URLs reales
+            pdf_data.seek(0)
+            urls_encontradas = []
             for page in reader.pages:
                 annots = page.get("/Annots")
                 if not annots:
@@ -95,42 +115,31 @@ async def procesar_licitaciones(req: Request):
                     try:
                         obj = a.get_object()
                         uri = None
-
-                        # Caso 1: enlace estándar
                         if "/A" in obj:
                             action = obj.get("/A")
                             if action:
                                 uri = action.get("/URI")
-
-                        # Caso 2: enlace directo sin /A
                         if not uri and "/URI" in obj:
                             uri = obj.get("/URI")
-
-                        # Caso 3: acción anidada o indirecta
                         if not uri and "/Action" in obj:
                             act = obj.get("/Action")
                             if isinstance(act, dict) and "/URI" in act:
                                 uri = act["/URI"]
-
                         if isinstance(uri, str) and uri.startswith(("http://", "https://")):
                             urls_encontradas.append(uri)
-
                     except Exception:
                         continue
-
-            print(f"🔗 URLs encontradas: {len(urls_encontradas)}")
+            print(f"🔗 URLs detectadas: {len(urls_encontradas)}")
 
         except Exception as e:
             print(f"❌ Error al procesar {url}: {e}")
             continue
 
-        # --- LIMPIEZA DEL TEXTO ---
-        clean_text = re.sub(r"(\w)\n(\w)", r"\1 \2", text)
-        clean_text = clean_text.replace("\r", "").replace("\n", " ")
-
-        # --- DETECCIÓN DE BLOQUES POR 'CONVOCATORIA' ---
-        blocks = re.split(r"(?=CONVOCATORIA)", clean_text, flags=re.IGNORECASE)
-        blocks = [b for b in blocks if "CONVOCATORIA" in b or "Convocatoria" in b]
+        # -----------------------------------------
+        # ETAPA 2 – Extracción de convocatorias
+        # -----------------------------------------
+        blocks = re.split(r"(?=CONVOCATORIA)", texto_total, flags=re.IGNORECASE)
+        blocks = [b for b in blocks if "CONVOCATORIA" in b]
 
         url_index = 0
         for block in blocks:
@@ -139,24 +148,23 @@ async def procesar_licitaciones(req: Request):
                 enlace = urls_encontradas[url_index]
                 url_index += 1
 
-            # Si modo estricto está activo, descartar sin enlace
             if strict_mode and not enlace:
                 continue
 
             rows.append({
-                "Ámbito": extract_field(block, "Ámbito:", ALL_LABELS),
-                "Entidad Adjudicadora": extract_field(block, "Entidad Adjudicadora:", ALL_LABELS),
-                "Objeto": extract_field(block, "Objeto:", ALL_LABELS),
-                "Tramitacion y Procedimiento": extract_field(block, "Tramitacion y Procedimiento:", ALL_LABELS)
-                    or extract_field(block, "Tramitación y Procedimiento:", ALL_LABELS),
-                "Expediente": extract_field(block, "Expediente:", ALL_LABELS),
-                "Presupuesto": format_currency(extract_field(block, "Presupuesto:", ALL_LABELS)),
-                "Valor estimado del contrato": format_currency(extract_field(block, "Valor estimado del contrato:", ALL_LABELS)),
+                "Ámbito": extract_field(block, "Ámbito:", []),
+                "Entidad Adjudicadora": extract_field(block, "Entidad Adjudicadora:", []),
+                "Objeto": extract_field(block, "Objeto:", []),
+                "Tramitacion y Procedimiento": extract_field(block, "Tramitacion y Procedimiento:", [])
+                    or extract_field(block, "Tramitación y Procedimiento:", []),
+                "Expediente": extract_field(block, "Expediente:", []),
+                "Presupuesto": format_currency(extract_field(block, "Presupuesto:", [])),
+                "Valor estimado del contrato": format_currency(extract_field(block, "Valor estimado del contrato:", [])),
                 "Enlace al pliego (URL)": enlace,
-                "Vencimiento": format_date(extract_field(block, "Vencimiento:", ALL_LABELS)),
+                "Vencimiento": format_date(extract_field(block, "Vencimiento:", [])),
             })
 
-    # Guardar Excel en /tmp
+    # Crear Excel final
     output_path = f"/tmp/{OUTPUT_FILE}"
     df = pd.DataFrame(rows)
     df.to_excel(output_path, index=False)
@@ -168,9 +176,9 @@ async def procesar_licitaciones(req: Request):
         "strictMode": strict_mode
     })
 
-# -------------------------------
-# 🔹 Endpoint para descargar Excel
-# -------------------------------
+# -----------------------------------------
+# 🔹 Descarga y Health check
+# -----------------------------------------
 @app.get("/descargar/{filename}")
 async def descargar_archivo(filename: str):
     file_path = f"/tmp/{filename}"
@@ -178,9 +186,6 @@ async def descargar_archivo(filename: str):
         return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
     return FileResponse(file_path, filename=filename)
 
-# -------------------------------
-# 🔹 Health check
-# -------------------------------
 @app.get("/")
 async def root():
     return {"status": "ok"}
