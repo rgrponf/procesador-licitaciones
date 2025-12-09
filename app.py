@@ -69,6 +69,7 @@ ALL_LABELS = [
 async def procesar_licitaciones(req: Request):
     data = await req.json()
     file_urls = data.get("fileUrls", [])
+    strict_mode = data.get("strictMode", True)
     rows = []
 
     for url in file_urls:
@@ -78,26 +79,44 @@ async def procesar_licitaciones(req: Request):
             r.raise_for_status()
             pdf_data = BytesIO(r.content)
 
-            # --- 1️⃣ Extraer texto con pdfminer (mejor para OCR y saltos de línea)
+            # --- 1️⃣ Extraer texto con pdfminer (mejor OCR)
             text = extract_text(pdf_data)
 
-            # --- 2️⃣ Extraer URLs reales con PyPDF2 (anotaciones /URI)
+            # --- 2️⃣ Extraer URLs reales con PyPDF2 ---
             pdf_data.seek(0)
             reader = PyPDF2.PdfReader(pdf_data)
             urls_encontradas = []
+
             for page in reader.pages:
                 annots = page.get("/Annots")
-                if annots:
-                    for a in annots:
-                        try:
-                            obj = a.get_object()
+                if not annots:
+                    continue
+                for a in annots:
+                    try:
+                        obj = a.get_object()
+                        uri = None
+
+                        # Caso 1: enlace estándar
+                        if "/A" in obj:
                             action = obj.get("/A")
                             if action:
                                 uri = action.get("/URI")
-                                if isinstance(uri, str) and uri.startswith(("http://", "https://")):
-                                    urls_encontradas.append(uri)
-                        except Exception:
-                            continue
+
+                        # Caso 2: enlace directo sin /A
+                        if not uri and "/URI" in obj:
+                            uri = obj.get("/URI")
+
+                        # Caso 3: acción anidada o indirecta
+                        if not uri and "/Action" in obj:
+                            act = obj.get("/Action")
+                            if isinstance(act, dict) and "/URI" in act:
+                                uri = act["/URI"]
+
+                        if isinstance(uri, str) and uri.startswith(("http://", "https://")):
+                            urls_encontradas.append(uri)
+
+                    except Exception:
+                        continue
 
             print(f"🔗 URLs encontradas: {len(urls_encontradas)}")
 
@@ -106,7 +125,7 @@ async def procesar_licitaciones(req: Request):
             continue
 
         # --- LIMPIEZA DEL TEXTO ---
-        clean_text = re.sub(r"(\w)\n(\w)", r"\1 \2", text)  # une palabras partidas
+        clean_text = re.sub(r"(\w)\n(\w)", r"\1 \2", text)
         clean_text = clean_text.replace("\r", "").replace("\n", " ")
 
         # --- DETECCIÓN FLEXIBLE DE CONVOCATORIAS ---
@@ -122,6 +141,10 @@ async def procesar_licitaciones(req: Request):
             if url_index < len(urls_encontradas):
                 enlace = urls_encontradas[url_index]
                 url_index += 1
+
+            # Si estamos en modo estricto, ignorar convocatorias sin enlace
+            if strict_mode and not enlace:
+                continue
 
             rows.append({
                 "Ámbito": extract_field(block, "Ámbito:", ALL_LABELS),
@@ -143,7 +166,7 @@ async def procesar_licitaciones(req: Request):
 
     # Enlace público
     public_url = f"https://procesador-licitaciones.onrender.com/descargar/{OUTPUT_FILE}"
-    return JSONResponse({"excelUrl": public_url, "registros": len(rows)})
+    return JSONResponse({"excelUrl": public_url, "registros": len(rows), "strictMode": strict_mode})
 
 # -------------------------------
 # 🔹 Endpoint para descargar Excel
